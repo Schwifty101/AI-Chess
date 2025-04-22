@@ -131,7 +131,9 @@ class King(Piece):
             if board.is_in_bounds(new_pos):
                 piece = board.get_piece(new_pos)
                 if piece is None or piece.color != self.color:
-                    moves.append(new_pos)
+                    # Check if the new position would put kings adjacent
+                    if not self._adjacent_to_enemy_king(board, new_pos):
+                        moves.append(new_pos)
         
         if not self.has_moved and not board.is_under_attack(self.position, 'white' if self.color == 'black' else 'black', ignore_king=True):
             kingside = self._get_kingside_castling_moves(board)
@@ -142,6 +144,30 @@ class King(Piece):
                 moves.append(queenside)
         
         return moves
+    
+    def _adjacent_to_enemy_king(self, board, pos):
+        """Check if the given position is adjacent to the opponent's king"""
+        opponent_color = 'white' if self.color == 'black' else 'black'
+        
+        # Find opponent's king
+        opponent_king_pos = None
+        for r in range(8):
+            for c in range(8):
+                piece = board.grid[r][c]
+                if piece and isinstance(piece, King) and piece.color == opponent_color:
+                    opponent_king_pos = (r, c)
+                    break
+            if opponent_king_pos:
+                break
+                
+        if not opponent_king_pos:
+            return False
+            
+        # Check if the two positions are adjacent
+        row_diff = abs(pos[0] - opponent_king_pos[0])
+        col_diff = abs(pos[1] - opponent_king_pos[1])
+        
+        return row_diff <= 1 and col_diff <= 1
     
     def _get_kingside_castling_moves(self, board):
         row, col = self.position
@@ -171,4 +197,4 @@ class King(Piece):
         for c in range(col - 2, col + 1):
             if board.is_square_attacked((row, c), opponent_color):
                 return None
-        return (row, col - 2) 
+        return (row, col - 2)

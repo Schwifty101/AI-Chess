@@ -1,5 +1,3 @@
-import random
-import copy
 import time
 from chess.pieces import Pawn, Rook, Knight, Bishop, Queen, King
 
@@ -14,7 +12,7 @@ class ChessAI:
         self.quiescence_depth = 3  # Maximum depth for quiescence search
         self.transposition_table = {}  # Store previously evaluated positions
         self.nodes_evaluated = 0  # For performance tracking
-        self.piece_values = {'Pawn': 100, 'Knight': 320, 'Bishop': 330, 'Rook': 500, 'Queen': 900, 'King': 20000}
+        self.piece_values = {'Pawn': 100, 'Knight': 300, 'Bishop': 320, 'Rook': 500, 'Queen': 1500, 'King': 10000}
         # Killer move heuristic - store moves that caused beta cutoffs
         self.killer_moves = [[None, None] for _ in range(self.max_depth + 1)]
         # History heuristic - track effectiveness of each move across positions
@@ -330,25 +328,34 @@ class ChessAI:
         if ply_from_root >= self.quiescence_depth:
             return stand_pat
         
-        # Get and sort capturing moves
+        # Get and sort capturing moves and check moves
         color = self.color if (game.turn == self.color) == is_maximizing else self.opponent_color
         capture_moves = self._get_capture_moves(game, color)
+        check_moves = self._get_check_moves(game, color) if ply_from_root < 2 else []
         
-        # No captures available, return static evaluation
-        if not capture_moves:
+        # Combine and sort all tactical moves
+        tactical_moves = capture_moves + check_moves
+        if not tactical_moves:
             return stand_pat
         
-        # Sort captures by MVV-LVA
-        capture_moves = self._sort_tactical_moves(game, capture_moves)
+        # Sort captures by MVV-LVA and checks by potential
+        tactical_moves = self._sort_tactical_moves(game, tactical_moves)
         
         if is_maximizing:
-            for move in capture_moves:
+            for move in tactical_moves:
                 from_pos, to_pos, promotion = move
                 
-                # Static Exchange Evaluation (SEE) pruning
-                # Skip captures that lose material
-                if not self._is_favorable_capture(game.board, from_pos, to_pos):
-                    continue
+                # Skip unfavorable exchanges
+                if self._is_capture(game.board, from_pos, to_pos) and not self._is_favorable_capture(game.board, from_pos, to_pos):
+                    # Delta pruning - skip obviously bad captures
+                    moving_piece = game.board.get_piece(from_pos)
+                    target_piece = game.board.get_piece(to_pos)
+                    if target_piece:
+                        moving_value = self.piece_values.get(moving_piece.__class__.__name__, 0)
+                        target_value = self.piece_values.get(target_piece.__class__.__name__, 0)
+                        margin = 200  # Safety margin
+                        if stand_pat + target_value - moving_value + margin < alpha:
+                            continue
                 
                 game_copy = self._copy_game(game)
                 game_copy.play_move(from_pos, to_pos, promotion)
@@ -360,13 +367,20 @@ class ChessAI:
                 if alpha >= beta:
                     break
         else:
-            for move in capture_moves:
+            for move in tactical_moves:
                 from_pos, to_pos, promotion = move
                 
-                # Static Exchange Evaluation (SEE) pruning
-                # Skip captures that lose material
-                if not self._is_favorable_capture(game.board, from_pos, to_pos):
-                    continue
+                # Skip unfavorable exchanges
+                if self._is_capture(game.board, from_pos, to_pos) and not self._is_favorable_capture(game.board, from_pos, to_pos):
+                    # Delta pruning - skip obviously bad captures
+                    moving_piece = game.board.get_piece(from_pos)
+                    target_piece = game.board.get_piece(to_pos)
+                    if target_piece:
+                        moving_value = self.piece_values.get(moving_piece.__class__.__name__, 0)
+                        target_value = self.piece_values.get(target_piece.__class__.__name__, 0)
+                        margin = 200  # Safety margin
+                        if stand_pat - (target_value - moving_value) - margin > beta:
+                            continue
                 
                 game_copy = self._copy_game(game)
                 game_copy.play_move(from_pos, to_pos, promotion)
@@ -379,6 +393,49 @@ class ChessAI:
                     break
         
         return stand_pat
+        
+    def _get_check_moves(self, game, color):
+        """Get moves that give check to the opponent's king for quiescence search"""
+        check_moves = []
+        opponent_color = 'black' if color == 'white' else 'white'
+        
+        # Find opponent's king position
+        king_pos = None
+        for r in range(8):
+            for c in range(8):
+                piece = game.board.grid[r][c]
+                if piece and isinstance(piece, King) and piece.color == opponent_color:
+                    king_pos = (r, c)
+                    break
+            if king_pos:
+                break
+        
+        if not king_pos:
+            return check_moves
+        
+        # For each piece of the attacking color, check if it can deliver check
+        for r in range(8):
+            for c in range(8):
+                piece = game.board.grid[r][c]
+                if piece and piece.color == color:
+                    from_pos = (r, c)
+                    moves = piece.legal_moves(game.board)
+                    for to_pos in moves:
+                        # Skip captures as they're already handled
+                        if game.board.get_piece(to_pos):
+                            continue
+                        
+                        # Check if this move gives check
+                        new_board = game.board.copy()
+                        new_board.move_piece(from_pos, to_pos)
+                        if not self._king_in_check(new_board, color) and self._results_in_check(new_board, opponent_color):
+                            if isinstance(piece, Pawn) and ((piece.color == 'white' and to_pos[0] == 0) or (piece.color == 'black' and to_pos[0] == 7)):
+                                for promotion in ['Q', 'R', 'B', 'N']:
+                                    check_moves.append((from_pos, to_pos, promotion))
+                            else:
+                                check_moves.append((from_pos, to_pos, None))
+        
+        return check_moves
 
     def _get_capture_moves(self, game, color):
         """Get only capturing moves for quiescence search"""
@@ -420,12 +477,12 @@ class ChessAI:
                             for promotion in ['Q', 'R', 'B', 'N']:
                                 new_board = game.board.copy()
                                 new_board.move_piece(from_pos, to_pos, promotion)
-                                if not self._king_in_check(new_board, color):
+                                if not self._king_in_check(new_board, color) and not self._kings_adjacent(new_board):
                                     legal_moves.append((from_pos, to_pos, promotion))
                         else:
                             new_board = game.board.copy()
                             new_board.move_piece(from_pos, to_pos)
-                            if not self._king_in_check(new_board, color):
+                            if not self._king_in_check(new_board, color) and not self._kings_adjacent(new_board):
                                 legal_moves.append((from_pos, to_pos, None))
         return legal_moves
 
@@ -442,6 +499,22 @@ class ChessAI:
         opponent_color = 'black' if color == 'white' else 'white'
         return board.is_under_attack(king_pos, opponent_color) if king_pos else False
 
+    def _kings_adjacent(self, board):
+        """Check if the kings are adjacent to each other."""
+        white_king_pos = None
+        black_king_pos = None
+        for r in range(8):
+            for c in range(8):
+                piece = board.grid[r][c]
+                if piece and piece.__class__.__name__ == 'King':
+                    if piece.color == 'white':
+                        white_king_pos = (r, c)
+                    elif piece.color == 'black':
+                        black_king_pos = (r, c)
+        if white_king_pos and black_king_pos:
+            return abs(white_king_pos[0] - black_king_pos[0]) <= 1 and abs(white_king_pos[1] - black_king_pos[1]) <= 1
+        return False
+
     def _evaluate_position(self, game):
         if game.in_checkmate(self.color):
             return -100000
@@ -449,28 +522,104 @@ class ChessAI:
             return 100000
         elif game.in_stalemate(game.turn):
             return 0
+            
+        # Material score calculation
         material_score = 0
         position_score = 0
         is_endgame = self._is_endgame(game.board)
+        
+        # Count threats and defended pieces
+        ai_attacked_value = 0
+        opponent_attacked_value = 0
+        ai_defended_value = 0
+        opponent_defended_value = 0
+        
+        # Map of defended pieces
+        defended_pieces = {}
+        
+        # First pass: identify defended pieces
         for r in range(8):
             for c in range(8):
                 piece = game.board.grid[r][c]
                 if not piece:
                     continue
-                piece_value = self.piece_values.get(piece.__class__.__name__, 0)
-                pos_value = 0
+                    
+                # Check if piece is defended by a friendly piece
+                if game.board.is_under_attack((r, c), piece.color):
+                    defended_pieces[(r, c)] = True
+        
+        # Second pass: calculate material, position score and threats
+        for r in range(8):
+            for c in range(8):
+                piece = game.board.grid[r][c]
+                if not piece:
+                    continue
+                
                 piece_type = piece.__class__.__name__
+                piece_value = self.piece_values.get(piece_type, 0)
+                
+                # Position score based on piece type and position
+                pos_value = 0
                 if piece_type in self.position_values:
                     pos_value = self.position_values[piece_type][7-r][c] if piece.color == 'black' else self.position_values[piece_type][r][c]
+                
+                # Special handling for kings in the endgame
                 if piece_type == 'King' and is_endgame:
                     pos_value = self.king_endgame_values[7-r][c] if piece.color == 'black' else self.king_endgame_values[r][c]
+                
+                # Determine sign for the value based on piece color
                 value_factor = 1 if piece.color == self.color else -1
+                
+                # Add to material score
                 material_score += value_factor * piece_value
+                
+                # Add to position score
                 position_score += value_factor * pos_value
+                
+                # Handle threatened pieces
+                opponent_color = 'white' if piece.color == 'black' else 'black'
+                if game.board.is_under_attack((r, c), opponent_color):
+                    # This piece is under attack
+                    if piece.color == self.color:
+                        # Reduce score more for undefended pieces
+                        if (r, c) not in defended_pieces:
+                            ai_attacked_value += piece_value * 0.5  # Higher penalty for undefended pieces
+                        else:
+                            ai_attacked_value += piece_value * 0.2  # Lower penalty for defended pieces
+                    else:
+                        # Opponent's piece is under attack
+                        if (r, c) not in defended_pieces:
+                            opponent_attacked_value += piece_value * 0.5
+                        else:
+                            opponent_attacked_value += piece_value * 0.2
+                
+                # Handle defended pieces
+                if (r, c) in defended_pieces:
+                    if piece.color == self.color:
+                        ai_defended_value += piece_value * 0.1  # Small bonus for defended pieces
+                    else:
+                        opponent_defended_value += piece_value * 0.1
+        
+        # Calculate additional strategic factors
         mobility_score = self._evaluate_mobility(game)
         king_safety = self._evaluate_king_safety(game)
         pawn_structure = self._evaluate_pawn_structure(game)
-        return (material_score * 1.0 + position_score * 0.1 + mobility_score * 0.2 + king_safety * 0.3 + pawn_structure * 0.1)
+        
+        # Calculate threat score
+        threat_score = opponent_attacked_value - ai_attacked_value
+        
+        # Calculate defense score
+        defense_score = ai_defended_value - opponent_defended_value
+        
+        # Weight the different components
+        # Prioritize critical factors like king safety, material and threats
+        return (material_score * 1.0 + 
+                position_score * 0.1 + 
+                mobility_score * 0.3 + 
+                king_safety * 0.4 +  # Increased weight for king safety
+                pawn_structure * 0.1 + 
+                threat_score * 0.4 +  # New component for threats
+                defense_score * 0.1)  # New component for defense
 
     def _evaluate_mobility(self, game):
         ai_moves = len(self._get_all_legal_moves(game, self.color))
